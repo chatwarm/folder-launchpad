@@ -1,0 +1,30 @@
+# ============ 依赖与构建产物（可由源码重新生成）============
+node_modules/
+dist/
+dist-app/
+src-tauri/target/
+src-tauri/gen/
+
+# ============ 本地开发工具（不随仓库分发）============
+scripts/
+
+# ============ 运行时数据（配置/缓存/WebView 数据，均为本机生成）============
+launcher-config.json
+launcher-scan-cache.json
+scan-debug.log
+webview-data/
+
+# ============ 历史调试临时文件 ============
+_*.txt
+_*.json
+*.log
+
+# ============ 开发过程截图（非文档）============
+cdp_*.png
+运行验证截图.png
+验证-*.png
+
+# ============ 系统杂项 ============
+Thumbs.db
+desktop.ini
+.DS_Store

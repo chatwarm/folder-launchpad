@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Folder Launchpad</title>
+  </head>
+  <body>
+    <div id="app">
+      <!-- 左侧导航栏 -->
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="logo">🚀</div>
+          <div class="brand-text">
+            <span class="brand-name">Folder Launchpad</span>
+            <span class="brand-sub">文件夹启动台</span>
+          </div>
+          <button class="collapse-btn" id="collapse-btn" title="收起/展开">◀</button>
+        </div>
+
+        <div class="nav" id="nav"></div>
+
+        <div class="sidebar-footer">
+          <button class="btn ghost" id="browse-btn" title="选择文件夹">📂 <span class="ghost-label">选择文件夹</span></button>
+          <button class="btn ghost" id="settings-btn" title="设置">⚙️ <span class="ghost-label">设置</span></button>
+        </div>
+      </aside>
+
+      <!-- 右侧主内容 -->
+      <main class="main">
+        <header class="topbar">
+          <div class="path-display" id="path-display" title="当前加载的文件夹">
+            <span class="path-icon">📁</span>
+            <span class="path-text" id="path-text">尚未选择文件夹</span>
+          </div>
+          <button class="icon-btn" id="refresh-btn" title="刷新">🔄</button>
+          <div class="search-box" id="search-box">
+            <input
+              id="search-input"
+              type="text"
+              placeholder="搜索…"
+              spellcheck="false"
+            />
+          </div>
+        </header>
+
+        <div class="content" id="content">
+          <div class="section-title" id="section-title">全部</div>
+          <div class="status" id="status"></div>
+          <div class="grid" id="grid"></div>
+          <div class="empty" id="empty" style="display: none">
+            <div class="big">📁</div>
+            <p>选择一个文件夹，加载你的软件库</p>
+          </div>
+        </div>
+
+        <!-- 设置页面（默认隐藏） -->
+        <div class="settings-page" id="settings-page" style="display: none">
+          <div class="settings-head">
+            <div class="settings-title-wrap">
+              <div class="settings-title">设置</div>
+              <div class="settings-sub">应用偏好与数据位置</div>
+            </div>
+            <button class="btn settings-back" id="settings-back">← 返回</button>
+          </div>
+
+          <div class="settings-body">
+            <div class="setting-group">
+              <div class="setting-group-title">通用</div>
+              <div class="setting-card">
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">主题</div>
+                    <div class="setting-desc">亮色 / 暗色外观，切换后立即生效</div>
+                  </div>
+                  <div class="setting-control">
+                    <div class="seg" id="theme-seg">
+                      <button type="button" data-val="light">亮色</button>
+                      <button type="button" data-val="dark">暗色</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">启动时自动加载上次文件夹</div>
+                    <div class="setting-desc">开启后，打开应用会自动扫描上次使用的文件夹</div>
+                  </div>
+                  <div class="setting-control">
+                    <label class="switch" title="启动时自动加载上次文件夹">
+                      <input type="checkbox" id="auto-load-toggle" />
+                      <span class="switch-track"></span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <div class="setting-group-title">启动方式</div>
+              <div class="setting-card">
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">正常按钮：启动点击次数</div>
+                    <div class="setting-desc">亮色按钮（卡片中的「启动 xxx」等）：单击即启动，或双击启动</div>
+                  </div>
+                  <div class="setting-control">
+                    <div class="seg" id="click-normal-seg">
+                      <button type="button" data-val="single">单击</button>
+                      <button type="button" data-val="double">双击</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">灰色按钮：启动点击次数</div>
+                    <div class="setting-desc">灰色弱化按钮（「卸载」「说明」等次要项）：单击即启动，或双击启动</div>
+                  </div>
+                  <div class="setting-control">
+                    <div class="seg" id="click-weak-seg">
+                      <button type="button" data-val="single">单击</button>
+                      <button type="button" data-val="double">双击</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <div class="setting-group-title">数据</div>
+              <div class="setting-card">
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">配置文件</div>
+                    <div class="setting-desc"><code id="config-path-text">读取中…</code></div>
+                  </div>
+                  <div class="setting-control">
+                    <button class="btn mini" id="open-config-loc">打开位置</button>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">浏览器缓存目录</div>
+                    <div class="setting-desc"><code id="data-dir-text">读取中…</code></div>
+                  </div>
+                  <div class="setting-control">
+                    <button class="btn mini" id="open-data-loc">打开文件夹</button>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">清理缓存</div>
+                    <div class="setting-desc" id="cache-desc">删除扫描缓存与浏览器磁盘缓存（均可自动重建，不影响配置与收藏）</div>
+                  </div>
+                  <div class="setting-control">
+                    <button class="btn mini" id="clear-cache-btn">立即清理</button>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-label">免安装</div>
+                    <div class="setting-desc">所有数据仅保存在程序所在目录，不写入系统盘</div>
+                  </div>
+                  <div class="setting-control"><span class="setting-badge ok">已启用</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-footer" id="settings-footer"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div class="context-menu" id="context-menu" style="display: none"></div>
+
+    <!-- 双击启动提示气泡（如「再次点击即可启动」） -->
+    <div class="hint-toast" id="hint-toast" role="status" aria-live="polite"></div>
+
+    <!-- 二次确认弹窗 -->
+    <div class="modal-mask" id="modal-mask" style="display: none">
+      <div class="modal-card" role="dialog" aria-modal="true">
+        <div class="modal-title" id="modal-title"></div>
+        <div class="modal-body" id="modal-body"></div>
+        <div class="modal-actions">
+          <button class="btn mini" id="modal-cancel">取消</button>
+          <button class="btn mini primary" id="modal-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
