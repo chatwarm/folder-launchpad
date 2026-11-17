@@ -908,14 +908,19 @@ function applyScanResult(folder, res) {
 }
 
 /// 缓存秒开后：后台静默重扫，内容有变化才更新界面（无变化时界面纹丝不动）
+/// 后台静默校验：先用「轻量扫描」只比对目录结构（不提取图标、不写缓存），
+/// 结构真的变了才做一次完整扫描。校验本身只花几十毫秒，
+/// 不会在用户操作时开满线程跑 Shell/GDI 图标提取而造成卡顿。
 async function verifyScanInBackground(folder, cached) {
   window.__launcherStats.bgVerifies++
   try {
-    const fresh = await invoke('cmd_scan_folder', { folder })
+    const fresh = await invoke('cmd_scan_folder_light', { folder })
     if (state.folder !== folder) return // 校验期间已切换文件夹 → 丢弃旧结果，避免界面跳回
     if (scanSignature(fresh) !== scanSignature(cached)) {
+      const full = await invoke('cmd_scan_folder', { folder })
+      if (state.folder !== folder) return
       window.__launcherStats.bgUpdated++
-      applyScanResult(folder, fresh)
+      applyScanResult(folder, full)
     }
   } catch (e) {
     setStatus(`扫描失败：${e}（当前显示的是上次缓存）`, 'error')
@@ -1167,8 +1172,12 @@ async function init() {
         }
         if (cached && Array.isArray(cached.categories)) {
           applyScanResult(saved, cached)
-          // 首屏先稳定显示，再在空闲时后台校验（避免与首屏渲染争抢 CPU/IO）
-          setTimeout(() => { void verifyScanInBackground(saved, cached) }, 1200)
+          // 首屏先稳定显示，再在浏览器空闲时后台校验：
+          // requestIdleCallback 会在主线程忙（用户正在操作）时自动让路，
+          // 轻量校验本身开销很小，没必要再人为延迟。
+          const idle =
+            window.requestIdleCallback || ((fn) => setTimeout(fn, 600))
+          idle(() => { void verifyScanInBackground(saved, cached) }, { timeout: 3000 })
         } else {
           await scanAndLoad(saved)
         }

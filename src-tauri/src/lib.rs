@@ -276,8 +276,11 @@ enum IconTarget {
     Loose(usize, usize),
 }
 
-/// 扫描根目录，识别所有顶层分类；图标在最后统一并行提取
-fn scan_all(root: &Path) -> Vec<Category> {
+/// 扫描根目录，识别所有顶层分类
+///
+/// `with_icons = false` 时跳过图标提取——后台校验只需要目录结构，
+/// 提取 100+ 个 Shell 图标要开满线程并做 GDI 编码，会在用户操作时造成卡顿。
+fn scan_all(root: &Path, with_icons: bool) -> Vec<Category> {
     let mut categories: Vec<Category> = Vec::new();
     let entries = match fs::read_dir(root) {
         Ok(e) => e,
@@ -295,32 +298,34 @@ fn scan_all(root: &Path) -> Vec<Category> {
     }
     categories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    // 收集图标提取任务：
-    //  1) 文件夹卡片：取第一个非干扰项（优先非 .url）的路径；
-    //  2) 散装项：逐个提取（单个快捷方式也要显示真实图标）
-    let mut tasks: Vec<(IconTarget, String)> = Vec::new();
-    for (ci, c) in categories.iter().enumerate() {
-        for (ai, a) in c.apps.iter().enumerate() {
-            let src = a
-                .items
-                .iter()
-                .find(|it| !it.noise && it.kind != "url")
-                .or_else(|| a.items.first())
-                .map(|it| it.path.clone());
-            if let Some(s) = src {
-                tasks.push((IconTarget::App(ci, ai), s));
+    if with_icons {
+        // 收集图标提取任务：
+        //  1) 文件夹卡片：取第一个非干扰项（优先非 .url）的路径；
+        //  2) 散装项：逐个提取（单个快捷方式也要显示真实图标）
+        let mut tasks: Vec<(IconTarget, String)> = Vec::new();
+        for (ci, c) in categories.iter().enumerate() {
+            for (ai, a) in c.apps.iter().enumerate() {
+                let src = a
+                    .items
+                    .iter()
+                    .find(|it| !it.noise && it.kind != "url")
+                    .or_else(|| a.items.first())
+                    .map(|it| it.path.clone());
+                if let Some(s) = src {
+                    tasks.push((IconTarget::App(ci, ai), s));
+                }
+            }
+            for (li, it) in c.loose_items.iter().enumerate() {
+                tasks.push((IconTarget::Loose(ci, li), it.path.clone()));
             }
         }
-        for (li, it) in c.loose_items.iter().enumerate() {
-            tasks.push((IconTarget::Loose(ci, li), it.path.clone()));
-        }
-    }
-    let icons = extract_icons_parallel(&tasks);
-    for ((target, _), icon) in tasks.iter().zip(icons.into_iter()) {
-        if let Some(ic) = icon {
-            match target {
-                IconTarget::App(ci, ai) => categories[*ci].apps[*ai].icon = ic,
-                IconTarget::Loose(ci, li) => categories[*ci].loose_items[*li].icon = ic,
+        let icons = extract_icons_parallel(&tasks);
+        for ((target, _), icon) in tasks.iter().zip(icons.into_iter()) {
+            if let Some(ic) = icon {
+                match target {
+                    IconTarget::App(ci, ai) => categories[*ci].apps[*ai].icon = ic,
+                    IconTarget::Loose(ci, li) => categories[*ci].loose_items[*li].icon = ic,
+                }
             }
         }
     }
@@ -789,14 +794,32 @@ fn write_scan_cache(result: &ScanResult) {
 /// 避免占用主线程导致窗口卡死（同步命令会阻塞主线程）
 #[tauri::command]
 async fn cmd_scan_folder(folder: String) -> Result<ScanResult, String> {
-    match tauri::async_runtime::spawn_blocking(move || scan_folder_blocking(folder)).await {
+    match tauri::async_runtime::spawn_blocking(move || scan_folder_blocking(folder, true, true)).await
+    {
+        Ok(result) => result,
+        Err(e) => Err(format!("扫描任务异常: {}", e)),
+    }
+}
+
+/// 轻量扫描：只读目录结构，不提取图标、不写缓存。
+/// 供启动后的后台校验使用——校验只需判断「内容有没有变」，
+/// 而图标提取要开满线程跑 Shell/GDI，会把卡顿带到用户操作期间。
+#[tauri::command]
+async fn cmd_scan_folder_light(folder: String) -> Result<ScanResult, String> {
+    match tauri::async_runtime::spawn_blocking(move || scan_folder_blocking(folder, false, false))
+        .await
+    {
         Ok(result) => result,
         Err(e) => Err(format!("扫描任务异常: {}", e)),
     }
 }
 
 /// 扫描的同步实现（在后台线程中执行）
-fn scan_folder_blocking(folder: String) -> Result<ScanResult, String> {
+fn scan_folder_blocking(
+    folder: String,
+    with_icons: bool,
+    write_cache: bool,
+) -> Result<ScanResult, String> {
     let p = PathBuf::from(&folder);
     if !p.exists() {
         return Err(format!("文件夹不存在: {}", folder));
@@ -804,7 +827,7 @@ fn scan_folder_blocking(folder: String) -> Result<ScanResult, String> {
     if !p.is_dir() {
         return Err(format!("路径不是文件夹: {}", folder));
     }
-    let categories = scan_all(&p);
+    let categories = scan_all(&p, with_icons);
     let total_items = categories
         .iter()
         .map(|c| c.apps.iter().map(|a| a.items.len()).sum::<usize>() + c.loose_items.len())
@@ -814,8 +837,10 @@ fn scan_folder_blocking(folder: String) -> Result<ScanResult, String> {
         categories,
         total_items,
     };
-    // 写入磁盘缓存：下次启动可直接用缓存秒开
-    write_scan_cache(&result);
+    // 写入磁盘缓存：下次启动可直接用缓存秒开（轻量扫描不写，避免无谓磁盘 IO）
+    if write_cache {
+        write_scan_cache(&result);
+    }
     Ok(result)
 }
 
@@ -1207,6 +1232,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd_scan_folder,
+            cmd_scan_folder_light,
             cmd_open_item,
             cmd_open_folder,
             cmd_open_in_explorer,
