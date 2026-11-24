@@ -18,7 +18,7 @@ pub struct LaunchItem {
     pub ext: String,
     /// 类型：app / url / script / folder
     pub kind: String,
-    /// 是否为“干扰项”（卸载/帮助/网站等，默认折叠）
+    /// 是否为“干扰项”（卸载/帮助/网站等，默认弱化显示：变淡 + 排序靠后，不折叠）
     pub noise: bool,
     /// 图标（base64 data URL，如 "data:image/png;base64,..."。散装项由 scan_all 统一提取填充）
     #[serde(default)]
@@ -120,13 +120,19 @@ fn is_launchable_file(path: &Path) -> bool {
     EXECUTABLE_EXTS.contains(&ext.as_str()) || URL_EXTS.contains(&ext.as_str())
 }
 
-/// 去掉扩展名得到显示名
+/// 去掉扩展名得到显示名（大小写不敏感，只去掉最后一个扩展名）
 fn display_name(name: &str, ext: &str) -> String {
     if ext.is_empty() {
-        name.to_string()
-    } else {
-        name.trim_end_matches(&format!(".{}", ext)).to_string()
+        return name.to_string();
     }
+    let suffix_len = ext.len() + 1; // ".ext"
+    if name.len() > suffix_len {
+        let split = name.len() - suffix_len;
+        if name.is_char_boundary(split) && name[split..].eq_ignore_ascii_case(&format!(".{}", ext)) {
+            return name[..split].to_string();
+        }
+    }
+    name.to_string()
 }
 
 /// 构建一个 LaunchItem
@@ -513,13 +519,33 @@ fn launch(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn open_default(path: &Path) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    Command::new("cmd")
-        .args(["/C", "start", "", path.to_str().unwrap_or("")])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW：抑制 cmd 自身的控制台窗口
-        .spawn()
-        .map_err(|e| format!("启动失败: {}", e))?;
-    Ok(())
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // 用 ShellExecuteW 按原样传递路径，不经过 cmd.exe：
+    // 文件名里的 & ^ % 等字符不会被命令行解释，.lnk/.url 也由系统按关联打开。
+    let _com = com_init_thread();
+    let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let ret = unsafe {
+        ShellExecuteW(
+            HWND(0),
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW 返回值 > 32 为成功，否则是 SE_ERR_* 错误码
+    if ret.0 > 32 {
+        Ok(())
+    } else {
+        Err(format!("启动失败: shell code {}", ret.0))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -624,7 +650,7 @@ fn resolve_lnk_target(path: &Path) -> Option<String> {
 #[cfg(target_os = "windows")]
 fn pick_folder_dialog() -> Result<Option<String>, String> {
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
         COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{
@@ -633,8 +659,9 @@ fn pick_folder_dialog() -> Result<Option<String>, String> {
     };
 
     unsafe {
-        // 初始化 COM（若已初始化会返回 RPC_E_CHANGED_MODE，可忽略）
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // 只有本次初始化成功（S_OK / S_FALSE）才配对 CoUninitialize；
+        // RPC_E_CHANGED_MODE 表示线程已按其它模式初始化，此时反初始化会破坏计数。
+        let com_inited = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
 
         let result = (|| -> Result<Option<String>, String> {
             let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)
@@ -644,21 +671,26 @@ fn pick_folder_dialog() -> Result<Option<String>, String> {
             options |= FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
             dialog.SetOptions(options).map_err(|e| format!("设置选项失败: {}", e))?;
 
-            // 显示对话框：用户取消返回 Err(HRESULT 0x800704C7)，视为取消
+            // 显示对话框：用户取消返回 HRESULT 0x800704C7（ERROR_CANCELLED），与真实错误分开
             match dialog.Show(None) {
                 Ok(()) => {}
-                Err(_) => return Ok(None), // 用户取消
+                Err(e) if e.code().0 == 0x800704C7u32 as i32 => return Ok(None),
+                Err(e) => return Err(format!("打开对话框失败: {}", e)),
             }
 
             let item: IShellItem = dialog.GetResult().map_err(|e| format!("获取结果失败: {}", e))?;
             let pwstr = item
                 .GetDisplayName(SIGDN_FILESYSPATH)
                 .map_err(|e| format!("获取路径失败: {}", e))?;
-            let path = pwstr.to_string().map_err(|e| format!("路径转换失败: {}", e))?;
-            Ok(Some(path))
+            // GetDisplayName 返回 CoTaskMemAlloc 分配的字符串，必须显式释放
+            let converted = pwstr.to_string().map_err(|e| format!("路径转换失败: {}", e));
+            CoTaskMemFree(Some(pwstr.0 as *const core::ffi::c_void));
+            Ok(Some(converted?))
         })();
 
-        CoUninitialize();
+        if com_inited {
+            CoUninitialize();
+        }
         result
     }
 }
@@ -740,9 +772,19 @@ pub struct FavoriteItem {
 
 fn read_config() -> AppConfig {
     let p = config_path();
-    match fs::read_to_string(&p) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => AppConfig::default(),
+    let content = match fs::read_to_string(&p) {
+        Ok(c) => c,
+        Err(_) => return AppConfig::default(),
+    };
+    match serde_json::from_str(&content) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // 配置损坏时先留一份 .bak，避免随后的写入把原内容彻底覆盖
+            let bak = p.with_extension("json.bak");
+            let _ = fs::copy(&p, &bak);
+            debug_log(&format!("config: parse fail ({}) backup={}", e, bak.display()));
+            AppConfig::default()
+        }
     }
 }
 
@@ -752,7 +794,13 @@ fn write_config(cfg: &AppConfig) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }
     let json = serde_json::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败: {}", e))?;
-    fs::write(&p, json).map_err(|e| format!("保存配置失败: {}", e))?;
+    // 先写临时文件再原子替换，避免写入中断留下半截 JSON
+    let tmp = p.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|e| format!("保存配置失败: {}", e))?;
+    fs::rename(&tmp, &p).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("保存配置失败: {}", e)
+    })?;
     Ok(())
 }
 
@@ -870,18 +918,35 @@ fn cmd_open_in_explorer(path: String) -> Result<(), String> {
     }
 }
 
-/// 「打开文件位置」：打开对象上一级所在的文件夹（不做快捷方式解析）
-/// - 文件 → 其所在文件夹
-/// - 文件夹 → 其父目录（如 …\桌面\游戏\某游戏 → …\桌面\游戏）
+/// 「打开文件位置」：打开对象所在的文件夹并选中它（不解析快捷方式）
+/// - 文件（含 .lnk）→ 打开所在目录并选中该文件
+/// - 文件夹 → 打开父目录并选中该文件夹
+/// - 路径已失效 → 只打开父目录（不传 /select，避免 explorer 报错）
 #[tauri::command]
 fn cmd_open_file_location(path: String) -> Result<(), String> {
-    let p = PathBuf::from(&path);
-    let parent = p
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .map(|d| d.to_path_buf())
-        .ok_or_else(|| format!("无法定位上一级位置: {}", path))?;
-    open_with_explorer(&parent)
+    // 去掉末尾分隔符，避免 explorer 对 /select 的参数解析异常；驱动器根（D:\）保持原样
+    let trimmed = path.trim_end_matches(|c| c == '\\' || c == '/');
+    let normalized = if trimmed.is_empty() || trimmed.ends_with(':') {
+        path.as_str()
+    } else {
+        trimmed
+    };
+    let p = PathBuf::from(normalized);
+
+    if p.exists() {
+        // 驱动器根没有父目录可定位，直接打开自身
+        if !p.parent().map(|d| !d.as_os_str().is_empty()).unwrap_or(false) {
+            return open_with_explorer(&p);
+        }
+        // 文件与文件夹统一：/select 自身即可在父目录中选中它
+        return reveal_in_explorer(&p);
+    }
+
+    // 路径不存在：降级为打开父目录，不做选中
+    match p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(dir) => open_with_explorer(dir),
+        None => Err(format!("无法定位所在位置: {}", path)),
+    }
 }
 
 /// 「打开原文件位置」：解析 .lnk 快捷方式打开其指向的原软件位置（文件→所在文件夹并选中；文件夹→打开本身）
@@ -995,12 +1060,6 @@ fn cmd_get_app_info() -> AppInfo {
     }
 }
 
-/// 读取「启动时自动加载上次文件夹」开关
-#[tauri::command]
-fn cmd_get_auto_load() -> Result<bool, String> {
-    Ok(read_config().auto_load)
-}
-
 /// 设置「启动时自动加载上次文件夹」开关
 #[tauri::command]
 fn cmd_set_auto_load(enabled: bool) -> Result<(), String> {
@@ -1075,9 +1134,9 @@ async fn cmd_load_scan_cache(folder: String) -> Result<Option<ScanResult>, Strin
     }
 }
 
-/// 在资源管理器中定位文件（「打开文件位置」）
-/// 对 .lnk 快捷方式：优先定位其指向的目标（与系统右键「打开文件位置」一致）；
-/// 解析失败或目标不存在时，退化为定位快捷方式本身；文件不存在时退化为打开其所在文件夹
+/// 在资源管理器中显示指定文件（设置页「打开位置」用）
+/// 对 .lnk 快捷方式：优先定位其指向的目标；解析失败或目标不存在时定位快捷方式本身；
+/// 文件不存在时退化为打开其所在文件夹
 #[tauri::command]
 fn cmd_reveal_file(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
@@ -1246,7 +1305,6 @@ pub fn run() {
             cmd_remove_favorite,
             cmd_pick_folder,
             cmd_get_app_info,
-            cmd_get_auto_load,
             cmd_set_auto_load,
             cmd_get_settings,
             cmd_set_theme,

@@ -10,9 +10,9 @@ pub fn extract_icon_png(path: &str) -> Option<String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Graphics::Gdi::DeleteObject;
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
     use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+    use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
 
     const SIZE: i32 = 48;
 
@@ -41,7 +41,9 @@ pub fn extract_icon_png(path: &str) -> Option<String> {
     let result = hicon_to_png(icon, SIZE, path);
 
     unsafe {
-        let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(icon.0));
+        // HICON 是 USER 句柄，必须用 DestroyIcon 释放；DeleteObject 对它无效，
+        // 会把图标连同其内部位图一起泄漏（每轮扫描每图标 +1 USER / +3 GDI）。
+        let _ = DestroyIcon(icon);
     }
     result
 }

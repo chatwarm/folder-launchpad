@@ -35,6 +35,7 @@ const els = {
   browseBtn: document.getElementById('browse-btn'),
   settingsBtn: document.getElementById('settings-btn'),
   refreshBtn: document.getElementById('refresh-btn'),
+  topBtn: document.getElementById('top-btn'),
   searchBox: document.getElementById('search-box'),
   searchInput: document.getElementById('search-input'),
   content: document.getElementById('content'),
@@ -179,6 +180,12 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
+// 收藏项来自配置文件，kind 会拼进 class 属性；只允许已知类型，避免异常配置注入
+const ITEM_KINDS = new Set(['app', 'url', 'script', 'folder', 'file'])
+function safeKind(kind) {
+  return ITEM_KINDS.has(kind) ? kind : 'app'
+}
+
 // ---------------- 收藏辅助 ----------------
 function isFav(name, path) {
   return state.favorites.some((f) => f.name === name && f.path === path)
@@ -268,6 +275,7 @@ function showContentView() {
   els.settingsPage.style.display = 'none'
   els.searchBox.style.display = ''
   els.refreshBtn.style.display = ''
+  els.topBtn.style.display = ''
   els.pathDisplay.style.display = ''
 }
 
@@ -276,6 +284,7 @@ function showSettingsView() {
   els.settingsPage.style.display = 'block'
   els.searchBox.style.display = 'none'
   els.refreshBtn.style.display = 'none'
+  els.topBtn.style.display = 'none'
   els.pathDisplay.style.display = 'none'
   // 清除侧栏选中态
   els.nav.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'))
@@ -362,12 +371,21 @@ function renderGrid() {
   els.grid.innerHTML = ''
   cancelPendingLaunch() // 列表重绘时收起「再次点击」待启动状态
 
+  const q = state.search.trim().toLowerCase() // 搜索词：卡片标题与条目名共用同一规则
+
   // 收藏页：单独渲染（同一文件夹卡片下的多个收藏项合并为一张卡）
   if (state.activeCategory === 'fav') {
     els.sectionTitle.textContent = '收藏'
     if (state.favorites.length === 0) {
-      els.grid.innerHTML = `<div class="fav-empty"><div class="big">⭐</div><p>还没有收藏任何项。在卡片或条目上右键即可收藏。</p></div>`
-      els.empty.style.display = 'none'
+      if (q) {
+        // 搜索无结果：与主视图统一空态文案
+        els.grid.innerHTML = ''
+        els.empty.style.display = 'flex'
+        els.empty.querySelector('p').textContent = '没有匹配的项'
+      } else {
+        els.grid.innerHTML = `<div class="fav-empty"><div class="big">⭐</div><p>还没有收藏任何项。在卡片或条目上右键即可收藏。</p></div>`
+        els.empty.style.display = 'none'
+      }
       return
     }
 
@@ -397,7 +415,25 @@ function renderGrid() {
       g.favs.push(f)
     }
 
-    for (const g of groups) {
+    // 搜索过滤：卡片名命中 → 保留该组全部收藏项；否则只保留名字命中的收藏项
+    const visible = q
+      ? groups
+          .map((g) => {
+            if (g.app && g.app.name.toLowerCase().includes(q)) return g
+            const favs = g.favs.filter((f) => f.name.toLowerCase().includes(q))
+            return favs.length ? { app: g.app, cat: g.cat, favs } : null
+          })
+          .filter(Boolean)
+      : groups
+
+    if (visible.length === 0) {
+      els.grid.innerHTML = ''
+      els.empty.style.display = 'flex'
+      els.empty.querySelector('p').textContent = '没有匹配的项'
+      return
+    }
+
+    for (const g of visible) {
       if (g.app) {
         // 文件夹卡片样式：芯片 = 该卡片下已收藏的启动项（顺序跟随主视图）
         const card = document.createElement('div')
@@ -414,7 +450,7 @@ function renderGrid() {
         }
         const chips = ordered.map((it) => {
           const noiseCls = it.noise ? ' noise' : ''
-          return `<span class="chip ${it.kind}${noiseCls} is-fav" data-path="${escapeHtml(it.path)}" data-name="${escapeHtml(it.name)}" title="${escapeHtml(it.path || it.name)}"><span class="dot"></span>${escapeHtml(it.name)}<span class="fav-badge">⭐</span></span>`
+          return `<span class="chip ${safeKind(it.kind)}${noiseCls} is-fav" data-path="${escapeHtml(it.path)}" data-name="${escapeHtml(it.name)}" title="${escapeHtml(it.path || it.name)}"><span class="dot"></span>${escapeHtml(it.name)}<span class="fav-badge">⭐</span></span>`
         }).join('')
         card.innerHTML = `
           <div class="app-head">
@@ -469,7 +505,7 @@ function renderGrid() {
             <div class="app-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div>
           </div>
           <div class="app-items">
-            <span class="chip ${f.kind}"><span class="dot"></span>${escapeHtml(f.category || '收藏')}</span>
+            <span class="chip ${safeKind(f.kind)}"><span class="dot"></span>${escapeHtml(f.category || '收藏')}</span>
           </div>
         `
         bindLaunch(card, false, () => onOpen(f.path, f.name, card))
@@ -484,8 +520,6 @@ function renderGrid() {
     return
   }
 
-  const q = state.search.trim().toLowerCase()
-
   let cats = state.categories
   if (state.activeCategory !== 'all') {
     cats = cats.filter((c) => c.name === state.activeCategory)
@@ -498,7 +532,11 @@ function renderGrid() {
   for (const cat of cats) {
     // 软件卡片
     for (const app of cat.apps) {
-      const items = app.items.filter((it) => !q || it.name.toLowerCase().includes(q))
+      // 搜索：卡片标题命中 → 显示该卡全部芯片；否则只显示命中的芯片
+      const titleHit = !!q && app.name.toLowerCase().includes(q)
+      const items = titleHit || !q
+        ? app.items
+        : app.items.filter((it) => it.name.toLowerCase().includes(q))
       if (items.length === 0) continue
       total += items.length
       const card = document.createElement('div')
@@ -513,7 +551,7 @@ function renderGrid() {
         const noiseCls = it.noise ? ' noise' : ''
         const favCls = isFav(it.name, it.path) ? ' is-fav' : ''
         const star = isFav(it.name, it.path) ? '<span class="fav-badge">⭐</span>' : ''
-        return `<span class="chip ${it.kind}${noiseCls}${favCls}" data-path="${escapeHtml(it.path)}" data-name="${escapeHtml(it.name)}" title="${escapeHtml(it.path || it.name)}"><span class="dot"></span>${escapeHtml(it.name)}${star}</span>`
+        return `<span class="chip ${safeKind(it.kind)}${noiseCls}${favCls}" data-path="${escapeHtml(it.path)}" data-name="${escapeHtml(it.name)}" title="${escapeHtml(it.path || it.name)}"><span class="dot"></span>${escapeHtml(it.name)}${star}</span>`
       }).join('')
 
       card.innerHTML = `
@@ -598,6 +636,7 @@ async function runPathAction(cmd, path, okMsg) {
   }
   try {
     await invoke(cmd, { path })
+    window.__launcherStats.lastAction = { cmd, path } // 自动化验证用：记录最近一次路径操作
     setStatusAnimated(okMsg, 'ok')
   } catch (e) {
     setStatusAnimated(`操作失败：${e}`, 'error')
@@ -607,6 +646,7 @@ async function runPathAction(cmd, path, okMsg) {
 /// 软件项 / 卡片共用的右键菜单
 function showContextMenu(x, y, item, app) {
   const menu = els.contextMenu
+  menu.dataset.target = '' // 条目菜单不记录目标路径，避免沿用上一次空白菜单的旧值
   cancelPendingLaunch() // 右键视为取消「再次点击」待启动状态
   const faved = isFav(item.name, item.path)
 
@@ -614,7 +654,7 @@ function showContextMenu(x, y, item, app) {
   const favPayload = {
     name: item.name,
     path: item.path,
-    kind: item.kind || 'app',
+    kind: safeKind(item.kind),
     icon: iconHtml || null,
     category: item.category || '',
   }
@@ -624,7 +664,7 @@ function showContextMenu(x, y, item, app) {
     <div class="ctx-item" data-act="fav">${faved ? '⭐ 取消收藏' : '☆ 收藏'}</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" data-act="explorer" title="打开该文件夹；若是文件，则打开它所在的文件夹">📂 在资源管理器中打开</div>
-    <div class="ctx-item" data-act="reveal" title="打开它上一级所在的文件夹（快捷方式也只看它自身的位置）">📍 打开文件位置</div>
+    <div class="ctx-item" data-act="reveal" title="打开它所在的文件夹并选中它；若是文件夹则定位到父目录（快捷方式不解析目标）">📍 打开文件位置</div>
     <div class="ctx-item" data-act="origin" title="打开快捷方式指向的原软件位置；非快捷方式则打开其自身位置">🎯 打开原文件位置</div>
     <div class="ctx-item" data-act="props">ℹ️ 属性</div>
     <div class="ctx-sep"></div>
@@ -651,8 +691,8 @@ function showContextMenu(x, y, item, app) {
         // #1 在资源管理器中打开：文件夹 → 进入本身；文件 → 打开所在文件夹
         await runPathAction('cmd_open_in_explorer', favPayload.path, '已在资源管理器中打开')
       } else if (act === 'reveal') {
-        // #2 打开文件位置：打开它上一级所在的文件夹（不解析快捷方式）
-        await runPathAction('cmd_open_file_location', favPayload.path, '已打开上一级所在位置')
+        // #2 打开文件位置：打开它所在的文件夹并选中它（文件夹定位到父目录；不解析快捷方式）
+        await runPathAction('cmd_open_file_location', favPayload.path, `已打开「${favPayload.name}」所在位置`)
       } else if (act === 'origin') {
         // #3 打开原文件位置：快捷方式 → 其指向的原软件位置；否则自身位置
         await runPathAction('cmd_open_original_location', favPayload.path, '已打开原文件位置')
@@ -670,14 +710,17 @@ function showContextMenu(x, y, item, app) {
   })
 }
 
-/// 空白区域（卡片以外）的右键菜单：刷新 / 打开当前路径 / 打开总目录路径
-function showEmptyMenu(x, y) {
+/// 空白区域（卡片以外）的右键菜单：刷新 / 在资源管理器中打开 / 打开所在位置 / 打开总目录路径
+/// targetPath：本次右键的目标（主内容区 → 当前视图路径；侧栏分类项 → 该分类路径）
+function showEmptyMenu(x, y, targetPath) {
   const menu = els.contextMenu
+  menu.dataset.target = targetPath || '' // 便于排查与自动化验证：记录本次菜单的目标路径
   cancelPendingLaunch()
   menu.innerHTML = `
     <div class="ctx-item" data-act="refresh">🔄 刷新</div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item" data-act="open-current">📂 打开当前路径</div>
+    <div class="ctx-item" data-act="explorer" title="直接打开该文件夹本身">📂 在资源管理器中打开</div>
+    <div class="ctx-item" data-act="open-current" title="打开它所在的文件夹并选中它（文件夹则定位到父目录）">📂 打开所在位置</div>
     <div class="ctx-item" data-act="open-root">🏠 打开总目录路径</div>
   `
 
@@ -690,13 +733,21 @@ function showEmptyMenu(x, y) {
       if (act === 'refresh') {
         // 刷新当前打开的视图（保持当前分类，不回到「全部」）
         await refresh()
-      } else if (act === 'open-current') {
-        const p = currentFolderPath()
+      } else if (act === 'explorer') {
+        // 在资源管理器中直接打开目标文件夹本身
+        const p = targetPath || ''
         if (!p) {
           setStatusAnimated('尚未选择文件夹', 'error')
           return
         }
-        await runPathAction('cmd_open_folder', p, `已打开「${p}」`)
+        await runPathAction('cmd_open_in_explorer', p, `已打开「${p}」`)
+      } else if (act === 'open-current') {
+        const p = targetPath || ''
+        if (!p) {
+          setStatusAnimated('尚未选择文件夹', 'error')
+          return
+        }
+        await runPathAction('cmd_open_file_location', p, `已打开「${p}」所在位置`)
       } else if (act === 'open-root') {
         if (!state.folder) {
           setStatusAnimated('尚未选择文件夹', 'error')
@@ -725,13 +776,27 @@ document.addEventListener('click', hideContextMenu)
 document.addEventListener('scroll', hideContextMenu, true)
 window.addEventListener('resize', hideContextMenu)
 
-// 全局右键：屏蔽 WebView2 原生菜单；空白区域弹出简化菜单
+// 全局右键：屏蔽 WebView2 原生菜单；只在主内容区与「具体分类项」上弹出空白菜单
 // （芯片 / 卡片 / 散装项 / 收藏卡在各自的 contextmenu 监听里已 preventDefault 并弹对应菜单）
 document.addEventListener('contextmenu', (e) => {
   if (e.defaultPrevented) return
-  e.preventDefault()
+  e.preventDefault() // 所有区域都屏蔽原生菜单（顶栏、品牌区、底栏、设置页也屏蔽）
   if (e.target.closest('.context-menu') || e.target.closest('.modal-mask')) return
-  showEmptyMenu(e.clientX, e.clientY)
+
+  // 侧栏：只有具体分类响应（「全部」「收藏」与侧栏空白不弹），目标 = 被右键的那个分类
+  const navItem = e.target.closest('#nav .nav-item')
+  if (navItem) {
+    const catName = navItem.dataset.cat || ''
+    if (!catName || catName === 'all' || catName === 'fav') return
+    const cat = state.categories.find((c) => c.name === catName)
+    showEmptyMenu(e.clientX, e.clientY, (cat && cat.path) || state.folder || '')
+    return
+  }
+
+  // 主内容区：标题 / 状态栏 / 网格空白 / 空态
+  if (e.target.closest('#content')) {
+    showEmptyMenu(e.clientX, e.clientY, currentFolderPath())
+  }
 })
 
 // ---------------- 启动反馈 ----------------
@@ -928,7 +993,7 @@ async function verifyScanInBackground(folder, cached) {
 }
 
 /// 扫描并加载指定文件夹
-async function scanAndLoad(folder, { silent = false } = {}) {
+async function scanAndLoad(folder) {
   if (!isTauri) {
     state.folder = folder
     state.categories = DEMO
@@ -940,13 +1005,19 @@ async function scanAndLoad(folder, { silent = false } = {}) {
     return
   }
   try {
-    if (!silent) setStatus(`正在扫描「${folder}」…`, 'ok')
+    setStatus(`正在扫描「${folder}」…`, 'ok')
     els.refreshBtn.classList.remove('spin')
     void els.refreshBtn.offsetWidth // 重排以重启动画
     els.refreshBtn.classList.add('spin') // 扫描期间持续旋转，作为加载指示
     const res = await invoke('cmd_scan_folder', { folder })
-    await invoke('cmd_save_folder', { folder })
+    // 先展示扫描结果，再保存文件夹设置：配置目录只读时也不影响本次使用
     applyScanResult(folder, res)
+    try {
+      await invoke('cmd_save_folder', { folder })
+    } catch (e) {
+      console.warn('保存文件夹失败', e)
+      setStatus(`已加载，但文件夹设置未能保存（目录可能只读）：${e}`, 'error')
+    }
   } catch (e) {
     setStatus(`扫描失败：${e}`, 'error')
   } finally {
@@ -998,6 +1069,11 @@ els.settingsBack.addEventListener('click', () => {
   renderGrid()
 })
 els.refreshBtn.addEventListener('click', refresh)
+
+// 回到顶部：滚动主内容区到顶端（尊重系统「减少动态效果」偏好）
+els.topBtn.addEventListener('click', () => {
+  els.content.scrollTo({ top: 0, behavior: prefersReducedMotion ? 'auto' : 'smooth' })
+})
 
 // 设置页：自动加载开关
 els.autoLoadToggle.addEventListener('change', async (e) => {
